@@ -1,0 +1,130 @@
+คู่มือ Build โปรแกรม ROI OCR Helper ด้วยตัวเอง
+================================================
+
+5. คำสั่งแบบรวดเดียว
+---------------------
+
+คัดลอกทั้งสามบรรทัดนี้ไปวางใน PowerShell ได้เลย:
+
+cargo build --manifest-path ".\rust-app\Cargo.toml" --release --locked
+New-Item -ItemType Directory -Force -Path ".\dist" | Out-Null
+Copy-Item ".\rust-app\target\release\roi-ocr-helper.exe" ".\dist\ROI-OCR-Helper.exe" -Force
+
+
+วิธีนี้เป็นการ Build อย่างเดียว ไม่รัน Test และไม่รัน Clippy
+
+
+1. สิ่งที่ต้องติดตั้งครั้งแรก
+----------------------------
+
+- Rust ผ่าน rustup: https://rustup.rs/
+- Visual Studio Build Tools พร้อม workload:
+  "Desktop development with C++"
+
+หลังติดตั้ง Rust ให้ปิดแล้วเปิด PowerShell ใหม่ จากนั้นตรวจสอบด้วยคำสั่ง:
+
+rustc --version
+cargo --version
+
+ถ้าทั้งสองคำสั่งแสดงเลขเวอร์ชัน แปลว่าพร้อม Build
+
+
+2. เปิด PowerShell ที่โฟลเดอร์โปรเจกต์
+--------------------------------------
+
+วิธีง่ายที่สุด:
+
+1) เปิดโฟลเดอร์ ScanToText ใน File Explorer
+2) คลิกช่อง Address ด้านบน
+3) พิมพ์ powershell แล้วกด Enter
+
+หรือเปิด PowerShell แล้วใช้คำสั่ง:
+
+cd "C:\Users\Zkynovice\Downloads\ScanToText"
+
+
+3. Build แบบ Release โดยไม่รัน Test
+------------------------------------
+
+รันคำสั่งนี้จากโฟลเดอร์ ScanToText:
+
+cargo build --manifest-path ".\rust-app\Cargo.toml" --release --locked
+
+รอจนเห็นข้อความประมาณนี้:
+
+Finished `release` profile [optimized]
+
+ไฟล์ที่ Build เสร็จจะอยู่ที่:
+
+rust-app\target\release\roi-ocr-helper.exe
+
+
+4. คัดลอกไฟล์พร้อมใช้เข้าโฟลเดอร์ dist
+-----------------------------------------
+
+รันสองคำสั่งนี้ต่อ:
+
+New-Item -ItemType Directory -Force -Path ".\dist" | Out-Null
+Copy-Item ".\rust-app\target\release\roi-ocr-helper.exe" ".\dist\ROI-OCR-Helper.exe" -Force
+
+ไฟล์พร้อมใช้งานจะอยู่ที่:
+
+dist\ROI-OCR-Helper.exe
+
+
+5. คำสั่งแบบรวดเดียว
+---------------------
+
+คัดลอกทั้งสามบรรทัดนี้ไปวางใน PowerShell ได้เลย:
+
+cargo build --manifest-path ".\rust-app\Cargo.toml" --release --locked
+New-Item -ItemType Directory -Force -Path ".\dist" | Out-Null
+Copy-Item ".\rust-app\target\release\roi-ocr-helper.exe" ".\dist\ROI-OCR-Helper.exe" -Force
+
+
+6. ตรวจสอบ SHA256 ของไฟล์
+-------------------------
+
+Get-FileHash -Algorithm SHA256 ".\dist\ROI-OCR-Helper.exe"
+
+ค่า SHA256 จะเปลี่ยนเมื่อโค้ดหรือไฟล์โปรแกรมเปลี่ยน เป็นเรื่องปกติ
+
+
+7. ล้างไฟล์ Build ชั่วคราวเมื่อไม่ต้องการแล้ว
+------------------------------------------------
+
+โฟลเดอร์ target มีขนาดใหญ่และสร้างใหม่ได้เสมอ ถ้าต้องการคืนพื้นที่ให้รัน:
+
+Remove-Item -LiteralPath ".\rust-app\target" -Recurse -Force
+
+ข้อควรทราบ: Build ครั้งถัดไปจะใช้เวลานานขึ้น เพราะ Cargo ต้องคอมไพล์ dependency ใหม่ทั้งหมด
+
+
+8. คำสั่งที่ไม่ควรใช้เมื่อต้องการ Build อย่างเดียว
+---------------------------------------------------
+
+อย่าใช้คำสั่งนี้:
+
+.\build.ps1
+
+เพราะ build.ps1 ของโปรเจกต์จะเรียก test.ps1 และรัน Test ก่อน Build
+
+
+9. แก้ปัญหาเบื้องต้น
+---------------------
+
+ปัญหา: ไม่รู้จักคำสั่ง cargo
+วิธีแก้: ติดตั้ง Rust จาก https://rustup.rs/ แล้วเปิด PowerShell ใหม่
+
+ปัญหา: linker `link.exe` not found
+วิธีแก้: ติดตั้ง Visual Studio Build Tools และเลือก "Desktop development with C++"
+
+ปัญหา: Build แล้วขึ้นว่าไฟล์ ROI-OCR-Helper.exe ถูกใช้งานอยู่
+วิธีแก้: ปิดโปรแกรม ROI OCR Helper ก่อน แล้วรันคำสั่ง Copy-Item ใหม่
+
+ปัญหา: ต้องการหยุด Build ระหว่างทำงาน
+วิธีแก้: กด Ctrl+C ใน PowerShell
+
+ปัญหา: Build ครั้งแรกใช้เวลานาน
+คำอธิบาย: เป็นเรื่องปกติ เพราะต้องคอมไพล์ dependency ทั้งหมด ครั้งต่อไปจะเร็วขึ้นถ้าไม่ลบโฟลเดอร์ target
+
