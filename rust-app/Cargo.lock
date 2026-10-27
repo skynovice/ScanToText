@@ -3618,7 +3618,7 @@ dependencies = [
 
 [[package]]
 name = "roi-ocr-helper"
-version = "1.4.1"
+version = "1.4.4"
 dependencies = [
  "arboard",
  "base64 0.22.1",

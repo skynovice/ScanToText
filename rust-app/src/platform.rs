@@ -24,6 +24,7 @@ mod windows_impl {
             RGN_OR, ReleaseDC, SRCCOPY, SelectObject, SetWindowRgn,
         },
         Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW},
+        System::DataExchange::GetClipboardSequenceNumber,
         System::Threading::CreateMutexW,
         UI::{
             HiDpi::{
@@ -33,11 +34,12 @@ mod windows_impl {
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC,
                 MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MapVirtualKeyW, VIRTUAL_KEY, VK_CONTROL,
-                VK_MENU, VK_V, keybd_event, mouse_event,
+                VK_C, VK_MENU, VK_V, keybd_event, mouse_event,
             },
             Shell::ShellExecuteW,
             WindowsAndMessaging::{
                 CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GetCursorPos,
+                GetForegroundWindow,
                 GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, MB_ICONWARNING,
                 MB_OK, MessageBoxW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
                 SM_YVIRTUALSCREEN, SPI_GETWORKAREA, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
@@ -489,6 +491,102 @@ mod windows_impl {
         Ok(())
     }
 
+    pub fn swap_selected_text_layout() -> Result<(), String> {
+        for _ in 0..100 {
+            let alt_down = unsafe { GetAsyncKeyState(VK_MENU.0.into()) } & 0x8000u16 as i16 != 0;
+            let c_down = unsafe { GetAsyncKeyState(VK_C.0.into()) } & 0x8000u16 as i16 != 0;
+            if !alt_down && !c_down {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let target = unsafe { GetForegroundWindow() };
+        if target.is_invalid() {
+            return Err("เลือกข้อความที่ต้องการสลับภาษาก่อน แล้วกด Alt+C".into());
+        }
+        let clipboard_sequence = unsafe { GetClipboardSequenceNumber() };
+        send_key(VK_CONTROL, false);
+        send_key(VK_C, false);
+        send_key(VK_C, true);
+        send_key(VK_CONTROL, true);
+        for _ in 0..50 {
+            if unsafe { GetClipboardSequenceNumber() } != clipboard_sequence {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        if unsafe { GetClipboardSequenceNumber() } == clipboard_sequence {
+            return Err("ไม่พบข้อความที่เลือก หรือแอปไม่อนุญาตให้คัดลอก".into());
+        }
+
+        let mut clipboard = Clipboard::new().map_err(|error| error.to_string())?;
+        let selected = clipboard
+            .get_text()
+            .map_err(|_| "ข้อความที่เลือกไม่ใช่ข้อความที่คัดลอกได้".to_owned())?;
+        let replacement = swap_keyboard_layout(&selected)?;
+        clipboard
+            .set_text(replacement)
+            .map_err(|error| format!("แทนที่ Clipboard ไม่สำเร็จ: {error}"))?;
+        if unsafe { GetForegroundWindow() } != target {
+            return Err(
+                "หน้าต่างที่เลือกเปลี่ยนไประหว่างทำงาน ข้อความใหม่อยู่ใน Clipboard แล้ว".into(),
+            );
+        }
+        send_paste_shortcut();
+        Ok(())
+    }
+
+    fn swap_keyboard_layout(text: &str) -> Result<String, String> {
+        // ponytail: this fixed map covers US QWERTY + Thai Kedmanee; other layouts need Win32 layout discovery.
+        const ROWS: [(&str, &str); 8] = [
+            ("`1234567890-=", "_ๅ/-ภถุึคตจขช"),
+            ("qwertyuiop[]\\", "ๆไำพะัีรนยบลฃ"),
+            ("asdfghjkl;'", "ฟหกดเ้่าสวง"),
+            ("zxcvbnm,./", "ผปแอิืทมใฝ"),
+            ("~!@#$%^&*()_+", "%+๑๒๓๔ู฿๕๖๗๘๙"),
+            ("QWERTYUIOP{}|", "๐\"ฎฑธํ๊ณฯญฐ,ฅ"),
+            ("ASDFGHJKL:\"", "ฤฆฏโฌ็๋ษศซ."),
+            ("ZXCVBNM<>?", "()ฉฮฺ์?ฒฬฦ"),
+        ];
+        let thai_count = text
+            .chars()
+            .filter(|ch| ('\u{0e00}'..='\u{0e7f}').contains(ch))
+            .count();
+        let latin_count = text.chars().filter(char::is_ascii_alphabetic).count();
+        let to_thai = thai_count <= latin_count && latin_count > 0;
+        if !to_thai && thai_count == 0 {
+            return Err("ไม่พบตัวอักษรไทยหรืออังกฤษที่รองรับในข้อความที่เลือก".into());
+        }
+
+        let mut converted_count = 0;
+        let converted: String = text
+            .chars()
+            .map(|ch| {
+                let mapped = ROWS
+                    .iter()
+                    .find_map(|(english, thai)| {
+                        let (from, to) = if to_thai {
+                            (*english, *thai)
+                        } else {
+                            (*thai, *english)
+                        };
+                        from.chars()
+                            .position(|key| key == ch)
+                            .and_then(|index| to.chars().nth(index))
+                    });
+                if mapped.is_some() {
+                    converted_count += 1;
+                }
+                mapped.unwrap_or(ch)
+            })
+            .collect();
+        if converted_count == 0 || converted == text {
+            return Err("ไม่พบตัวอักษรที่สลับผังแป้นพิมพ์ได้".into());
+        }
+        Ok(converted)
+    }
+
     pub fn click_and_paste_text(position: [i32; 2], text: &str) -> Result<(), String> {
         Clipboard::new()
             .and_then(|mut clipboard| clipboard.set_text(text.to_owned()))
@@ -525,6 +623,12 @@ mod windows_impl {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn swaps_the_example_in_both_directions() {
+            assert_eq!(swap_keyboard_layout("l;ylfu8iy["), Ok("สวัสดีครับ".into()));
+            assert_eq!(swap_keyboard_layout("สวัสดีครับ"), Ok("l;ylfu8iy[".into()));
+        }
 
         #[test]
         #[ignore = "requires an interactive Windows desktop"]

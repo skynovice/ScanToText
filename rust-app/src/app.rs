@@ -112,6 +112,7 @@ enum WorkerResult {
         value: Result<String, String>,
     },
     PasteApplied(Result<(), String>),
+    LayoutCorrection(Result<(), String>),
 }
 
 #[derive(Default)]
@@ -246,7 +247,7 @@ pub struct RoiOcrApp {
     ocr_paste_running: bool,
     ocr_paste_restore_main: Option<bool>,
     ocr_paste_click_position: Option<[i32; 2]>,
-    ocr_paste_success_until: Option<Instant>,
+    launcher_success_until: Option<Instant>,
     worker_tx: Sender<WorkerResult>,
     worker_rx: Receiver<WorkerResult>,
     pending_capture: Option<CaptureKind>,
@@ -315,7 +316,7 @@ impl RoiOcrApp {
         let (worker_tx, worker_rx) = unbounded();
         let (hotkey_manager, hotkey_actions, hotkey_error) = setup_hotkeys();
         let (tray, tray_actions) = setup_tray();
-        let (launcher_menu, launcher_actions) = build_action_menu();
+        let (launcher_menu, launcher_actions) = build_action_menu(true);
         let status = hotkey_error.unwrap_or_else(|| "เลือกแหล่งภาพเพื่อเริ่มแปลงข้อความ".into());
         Self {
             config,
@@ -341,7 +342,7 @@ impl RoiOcrApp {
             ocr_paste_running: false,
             ocr_paste_restore_main: None,
             ocr_paste_click_position: None,
-            ocr_paste_success_until: None,
+            launcher_success_until: None,
             worker_tx,
             worker_rx,
             pending_capture: None,
@@ -350,7 +351,7 @@ impl RoiOcrApp {
             translation_text: None,
             translation_open: false,
             translation_position: None,
-            welcome_open: false,
+            welcome_open: true,
             main_visible: false,
             launcher_initialized: false,
             launcher_native_styled: false,
@@ -700,7 +701,7 @@ impl RoiOcrApp {
         }
         // ponytail: only the keyboard shortcut supplies a click target; menu capture is copy-only.
         self.ocr_paste_click_position = click_position;
-        self.ocr_paste_success_until = None;
+        self.launcher_success_until = None;
         if let Some(feedback) = &mut self.launcher_feedback {
             feedback.hide();
         }
@@ -836,7 +837,7 @@ impl RoiOcrApp {
                         self.ocr_paste_running = false;
                         let click_position = self.ocr_paste_click_position.take();
                         if let Some(click_position) = click_position {
-                            self.ocr_paste_success_until =
+                            self.launcher_success_until =
                                 Some(Instant::now() + Duration::from_secs(2));
                             if let Some(feedback) = &mut self.launcher_feedback {
                                 feedback.show_ok();
@@ -853,7 +854,7 @@ impl RoiOcrApp {
                             let copied = Clipboard::new()
                                 .and_then(|mut clipboard| clipboard.set_text(text))
                                 .is_ok();
-                            self.ocr_paste_success_until =
+                            self.launcher_success_until =
                                 copied.then(|| Instant::now() + Duration::from_secs(2));
                             if let Some(feedback) = &mut self.launcher_feedback {
                                 if copied {
@@ -879,7 +880,7 @@ impl RoiOcrApp {
                 WorkerResult::PasteApplied(Ok(())) => {
                     self.restore_ocr_paste_visibility();
                     self.ocr_paste_running = false;
-                    self.ocr_paste_success_until = Some(Instant::now() + Duration::from_secs(2));
+                    self.launcher_success_until = Some(Instant::now() + Duration::from_secs(2));
                     if let Some(feedback) = &mut self.launcher_feedback {
                         feedback.show_ok();
                     }
@@ -888,13 +889,23 @@ impl RoiOcrApp {
                 WorkerResult::PasteApplied(Err(error)) => {
                     self.restore_ocr_paste_visibility();
                     self.ocr_paste_running = false;
-                    self.ocr_paste_success_until = None;
+                    self.launcher_success_until = None;
                     if let Some(feedback) = &mut self.launcher_feedback {
                         feedback.hide();
                     }
                     self.status = format!(
                         "วางข้อความไม่สำเร็จ ({error}) — ลองกด Ctrl+V หากคัดลอกลง Clipboard สำเร็จ"
                     );
+                }
+                WorkerResult::LayoutCorrection(Ok(())) => {
+                    self.launcher_success_until = Some(Instant::now() + Duration::from_secs(2));
+                    if let Some(feedback) = &mut self.launcher_feedback {
+                        feedback.show_ok();
+                    }
+                    self.status = "สลับภาษาให้ข้อความที่เลือกแล้ว".into();
+                }
+                WorkerResult::LayoutCorrection(Err(error)) => {
+                    self.status = error;
                 }
                 _ => {}
             }
@@ -909,7 +920,7 @@ impl RoiOcrApp {
         let kind = self.capture_session.take().map(|session| session.kind);
         self.ocr_paste_running = false;
         self.ocr_paste_click_position = None;
-        self.ocr_paste_success_until = None;
+        self.launcher_success_until = None;
         self.restore_backup(ctx);
         if kind != Some(CaptureKind::OcrPaste) {
             self.main_visible = false;
@@ -990,7 +1001,7 @@ impl RoiOcrApp {
 
     fn start_ocr_paste(&mut self, image: RgbaImage) {
         self.ocr_paste_running = true;
-        self.ocr_paste_success_until = None;
+        self.launcher_success_until = None;
         self.ocr_paste_id += 1;
         let id = self.ocr_paste_id;
         let config = self.config.clone();
@@ -1303,6 +1314,13 @@ impl RoiOcrApp {
                         self.status = "อ่านตำแหน่งเมาส์ไม่สำเร็จ จึงไม่เริ่ม Alt+A".into();
                     }
                 }
+                "layout-swap" => {
+                    let sender = self.worker_tx.clone();
+                    thread::spawn(move || {
+                        let result = platform::swap_selected_text_layout();
+                        let _ = sender.send(WorkerResult::LayoutCorrection(result));
+                    });
+                }
                 digit => {
                     if let Ok(index) = digit.parse::<usize>() {
                         let text = if self.translation_open && index <= 2 {
@@ -1461,16 +1479,16 @@ impl RoiOcrApp {
 
     fn floating_launcher(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, frame: &eframe::Frame) {
         if self
-            .ocr_paste_success_until
+            .launcher_success_until
             .is_some_and(|until| Instant::now() >= until)
         {
-            self.ocr_paste_success_until = None;
+            self.launcher_success_until = None;
             if let Some(feedback) = &mut self.launcher_feedback {
                 feedback.hide();
             }
         }
         let show_ocr_progress = self.ocr_paste_running;
-        let show_ocr_success = self.ocr_paste_success_until.is_some();
+        let show_launcher_success = self.launcher_success_until.is_some();
         if !self.launcher_initialized {
             let [x, y] = self
                 .config
@@ -1494,7 +1512,7 @@ impl RoiOcrApp {
                 x as f32, y as f32,
             )));
             self.launcher_feedback = platform::create_launcher_feedback(hwnd);
-            if show_ocr_success && let Some(feedback) = &mut self.launcher_feedback {
+            if show_launcher_success && let Some(feedback) = &mut self.launcher_feedback {
                 feedback.show_ok();
             }
             self.launcher_native_styled = true;
@@ -2329,42 +2347,95 @@ impl RoiOcrApp {
                                 .color(Color32::from_rgb(82, 96, 109)),
                             );
                             ui.add_space(8.0);
-                            ui.strong(
-                                egui::RichText::new("พร้อมใช้งาน")
-                                    .size(14.0)
-                                    .color(Color32::from_rgb(21, 90, 128)),
-                            );
-                            ui.add(egui::ProgressBar::new(1.0).show_percentage());
                             egui::Frame::group(ui.style())
                                 .fill(Color32::from_rgb(255, 247, 220))
                                 .show(ui, |ui| {
                                     ui.strong("ก่อนใช้งานครั้งแรก ต้องตั้งค่า API Key ใน Settings");
-                                    ui.label("เลือก OCR engine และกรอก API Key ให้ตรงกับบริการที่จะใช้ · Alt+A ใช้ Engine ที่เลือก · Alt+D ใช้ Gemini แปลเป็นไทย");
+                                    ui.label("เลือก OCR engine และกรอก API Key ของบริการนั้น · Alt+A ใช้ Engine ที่เลือก · Alt+D ใช้ Gemini แปลเป็นไทย");
                                     if ui.button("ตั้งค่า API ตอนนี้").clicked() {
                                         configure_api = true;
                                         close = true;
                                     }
                                 });
                             ui.add_space(8.0);
-                            egui::Frame::group(ui.style())
-                                .fill(Color32::from_rgb(244, 248, 251))
+                            ui.set_width(ui.available_width());
+                            ui.strong("คู่มือการใช้งาน · เลือกหัวข้อเพื่ออ่านรายละเอียด");
+                            egui::CollapsingHeader::new("1. เริ่มต้นใช้งานและตั้งค่า API")
+                                .id_salt("welcome-api")
+                                .default_open(false)
                                 .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.strong("วิธีใช้งานแบบย่อ");
-                                    ui.label("• กล้อง: กด ‘เปิดกล้อง’ ก่อน แล้วคลิกภาพหรือกด Spacebar เพื่อถ่าย");
-                                    ui.label("• หน้าจอ: กด Alt+S");
-                                    ui.label("• Capture Translate: กด Alt+D แล้วลากข้อความ 1 จุดเพื่อแปลเป็นไทยด้วย Gemini");
-                                    ui.label("  ผลต้นฉบับและคำแปลจะแสดงข้างไอคอนลอยจนกด ×");
-                                    ui.label("• OCR วางทันที: ชี้เมาส์ที่ช่องข้อความ กด Alt+A แล้วลากครอบ · ระบบคลิกตำแหน่งเดิมเพื่อวาง (มี Clipboard สำรอง)");
-                                    ui.label("• เมนูไอคอนลอย/Tray: เลือก OCR to Clipboard (Alt+A) เพื่อคัดลอกผลลง Clipboard โดยไม่คลิกหรือวางอัตโนมัติ");
-                                    ui.label(
-                                        "• ลากครั้งแรกเพื่อกำหนด Scope จากนั้นลาก Crop ได้หลายรายการ",
-                                    );
-                                    ui.label(
-                                        "• กด Enter เพื่อแปลงทันที · คลิกขวาหรือ Esc เพื่อยกเลิก Alt+S",
-                                    );
-                                    ui.label("• ผลลัพธ์จะรวมส่ง OCR แบบ Batch เพื่อลดจำนวน API calls");
-                                    ui.label("• ใช้ Alt+1…9 เพื่อวางข้อความลงโปรแกรมปลายทาง");
+                                    ui.label("เปิด Settings แล้วเลือก OCR.Space API หรือ Google Gemini API จากนั้นกรอก API Key ของบริการที่เลือกและกด Save");
+                                    ui.label("OCR.Space ใช้ Engine 3 ส่วน Gemini จะเลือก Flash รุ่นล่าสุดให้อัตโนมัติ · Alt+A ใช้ Engine ที่เลือก · Alt+D ต้องใช้ Gemini");
+                                    ui.label("ตั้ง Font และขนาดข้อความได้ใน Settings · ปุ่มแสดง API keys ใช้ตรวจ key ที่กรอก และมีลิงก์ไปหน้าสมัครบริการ");
+                                });
+                            egui::CollapsingHeader::new("2. เลือกภาพและใช้กล้อง")
+                                .id_salt("welcome-camera")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.label("กล้องเริ่มปิดไว้ · กด เปิดกล้อง แล้วเลือกอุปกรณ์จากรายการถ้ามีหลายตัว");
+                                    ui.label("เมื่อเห็นภาพสด ให้คลิกภาพหรือกด Spacebar เพื่อถ่าย · ภาพจะถูกบันทึกใน History และปิดกล้องได้โดยไม่ลบภาพ");
+                                    ui.label("ใช้ จับภาพหน้าจอ เพื่อเลือกภาพจากจอ หรือ ประวัติภาพ เพื่อเปิดภาพเดิม · ภาพใหม่เริ่มงานใหม่และอาจถามยืนยันก่อนล้างกรอบ");
+                                });
+                            egui::CollapsingHeader::new("3. จับภาพหน้าจอและกำหนดกรอบ (Alt+S)")
+                                .id_salt("welcome-screen-capture")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.label("กด Alt+S หรือปุ่ม จับภาพหน้าจอ แล้วลากครั้งแรกเพื่อกำหนด Scope ของภาพ จากนั้นลากครอบข้อความเป็น Crop ได้หลายกรอบ");
+                                    ui.label("ชี้เมาส์บน Crop แล้วกด × เพื่อลบกรอบนั้น · Backspace ลบ Crop ล่าสุด · กด Enter เพื่อจบการเลือกและเริ่ม OCR");
+                                    ui.label("คลิกขวาหรือ Esc เพื่อยกเลิกการจับภาพ · หลังแปลง โปรแกรมจะเปิดหน้าหลักพร้อมผลลัพธ์");
+                                });
+                            egui::CollapsingHeader::new("4. ครอบข้อความและแปลง OCR ในหน้าหลัก")
+                                .id_salt("welcome-main-ocr")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.label("ลากครอบข้อความบนภาพเพื่อเพิ่ม ROI ได้หลายกรอบ · ชี้กรอบแล้วกด × เพื่อลบ · แก้ข้อความที่แปลงแล้วในช่องผลลัพธ์ได้");
+                                    ui.label("เลือก OCR.Space (เร็ว) หรือ Gemini (แม่นยำ) แล้วกดปุ่มแปลง หรือกด Enter · หากไม่สำเร็จจะมีปุ่มลองแปลงอีกครั้ง");
+                                    ui.label("ปุ่มคัดลอกข้างแต่ละผลลัพธ์คัดลอกข้อความนั้น · ล้างกรอบและหมุนภาพมีการยืนยันเมื่ออาจกระทบ ROI");
+                                    ui.label("ปุ่มหมุนซ้าย/ขวาบันทึกภาพที่หมุนใน History · ซ่อนภาพเพื่อขยายพื้นที่ผลลัพธ์ได้ และปุ่มปักหมุดเปิด/ปิดหน้าต่างหลักไว้บนสุด");
+                                    ui.label("ปุ่ม เกี่ยวกับ แสดงข้อมูลโปรแกรม เวอร์ชัน และวันที่ปรับปรุง");
+                                });
+                            egui::CollapsingHeader::new("5. OCR แล้ววางทันทีด้วย Alt+A")
+                                .id_salt("welcome-alt-a")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.label("วางเมาส์ในช่องข้อความปลายทางก่อน แล้วกด Alt+A · ลากครอบบริเวณข้อความบนหน้าจอ โปรแกรมจะ OCR ด้วย Engine ที่เลือกและวางกลับที่ตำแหน่งเมาส์เดิม");
+                                    ui.label("ถ้าไม่ต้องการวางอัตโนมัติ ให้เปิดเมนูไอคอนลอยหรือ System Tray แล้วเลือก OCR to Clipboard · ลากบริเวณที่ต้องการ ผลจะอยู่ใน Clipboard สำหรับ Ctrl+V");
+                                });
+                            egui::CollapsingHeader::new("6. แก้ข้อความที่พิมพ์ผิดภาษา (Alt+C)")
+                                .id_salt("welcome-alt-c")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.label("เลือกข้อความที่พิมพ์ผิดเพราะลืมสลับภาษา แล้วกด Alt+C เพื่อแปลงระหว่าง US QWERTY กับ Thai Kedmanee และแทนที่ข้อความที่เลือก");
+                                    ui.label("ตัวอย่าง l;ylfu8iy[ → สวัสดีครับ · ข้อความที่แปลงจะอยู่ใน Clipboard ด้วย · ถ้าไม่มีข้อความที่เลือก โปรแกรมจะไม่แทนที่ข้อความ");
+                                });
+                            egui::CollapsingHeader::new("7. จับข้อความและแปลเป็นไทย (Alt+D)")
+                                .id_salt("welcome-alt-d")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.label("กด Alt+D แล้วลากเลือกข้อความหนึ่งบริเวณ · Gemini จะแปลเป็นภาษาไทยและแสดงทั้งข้อความต้นฉบับกับคำแปลในหน้าต่างเล็กข้างไอคอนลอย");
+                                    ui.label("หน้าต่างคำแปลคงอยู่จนกด × · ขณะเปิดผลแปล Alt+1 คัดลอกต้นฉบับ และ Alt+2 คัดลอกคำแปลลง Clipboard");
+                                });
+                            egui::CollapsingHeader::new("8. ผลลัพธ์และคีย์ลัด Alt+1 ถึง Alt+9")
+                                .id_salt("welcome-results")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.label("ในหน้าหลัก Alt+1 ถึง Alt+9 วางข้อความจาก ROI ลำดับที่ตรงกันลงในโปรแกรมที่กำลังใช้งาน · ผลลัพธ์แก้ไขและคัดลอกแยกแต่ละกรอบได้");
+                                    ui.label("การเลือกหลายกรอบจะส่ง OCR แบบ Batch · สถานะด้านล่างหน้าต่างบอก Engine และความคืบหน้าหรือข้อผิดพลาด");
+                                });
+                            egui::CollapsingHeader::new("9. History และจัดการภาพ")
+                                .id_salt("welcome-history")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.label("เปิด ประวัติภาพ เพื่อดูภาพที่ถ่ายหรือจับไว้ · คลิกเพื่อเลือก และดับเบิลคลิกหรือกด เปิดภาพ เพื่อกลับมาทำงานต่อ");
+                                    ui.label("เลือกได้หลายภาพแล้วกด ลบที่เลือก โดยมีหน้าต่างยืนยัน · ภาพที่บันทึกไว้เก็บกรอบและข้อความ OCR เพื่อเปิดทำต่อได้");
+                                });
+                            egui::CollapsingHeader::new("10. ไอคอนลอย, System Tray และออกจากโปรแกรม")
+                                .id_salt("welcome-launcher-tray")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.label("คลิกไอคอนลอยเพื่อเปิดเมนู และลากไอคอนเพื่อย้ายตำแหน่ง · เมนูมีแสดงโปรแกรม, Welcome, จับภาพ, OCR to Clipboard, แปล, History, Settings และออกจากโปรแกรม · เปิด Welcome จากเมนูได้อีกภายหลัง");
+                                    ui.label("หน้าต่างหลักเริ่มซ่อนอยู่และปิดหน้าต่างเพื่อซ่อน ไม่ได้ออกจากโปรแกรม · เลือก ออกจากโปรแกรม จากเมนูไอคอนลอยหรือ System Tray เมื่อต้องการปิดจริง");
+                                    ui.label("รายการแนะนำ Alt+C ในเมนูไอคอนลอยเป็นข้อความปิดใช้งาน กดไม่ได้ · ใช้คีย์ลัด Alt+C แทน");
                                 });
                             ui.add_space(12.0);
                             if ui.button("ปิดหน้าต่างนี้").clicked() {
@@ -3127,6 +3198,7 @@ fn setup_hotkeys() -> (
     for (code, name, action) in [
         (Code::KeyS, "Alt+S", "capture"),
         (Code::KeyA, "Alt+A", "ocr-paste"),
+        (Code::KeyC, "Alt+C", "layout-swap"),
         (Code::KeyD, "Alt+D", "translate"),
     ] {
         let hotkey = HotKey::new(Some(Modifiers::ALT), code);
@@ -3204,7 +3276,7 @@ fn menu_icon(bytes: &[u8]) -> Option<MenuIcon> {
     })
 }
 
-fn build_action_menu() -> (Menu, TrayActions) {
+fn build_action_menu(show_layout_tip: bool) -> (Menu, TrayActions) {
     let menu = Menu::new();
     let show = IconMenuItem::new(
         "แสดงโปรแกรม",
@@ -3242,6 +3314,12 @@ fn build_action_menu() -> (Menu, TrayActions) {
         menu_icon(include_bytes!("../../assets/icons/history.png")),
         None,
     );
+    let layout_tip = IconMenuItem::new(
+        "แนะนำ: เลือกข้อความ แล้วกด Alt+C เพื่อสลับไทย/English",
+        false,
+        menu_icon(include_bytes!("../../assets/icons/copy.png")),
+        None,
+    );
     let settings = IconMenuItem::new(
         "Settings",
         true,
@@ -3257,6 +3335,7 @@ fn build_action_menu() -> (Menu, TrayActions) {
     let separator1 = PredefinedMenuItem::separator();
     let separator2 = PredefinedMenuItem::separator();
     let separator3 = PredefinedMenuItem::separator();
+    let separator4 = PredefinedMenuItem::separator();
     let _ = menu.append_items(&[
         &show,
         &welcome,
@@ -3266,10 +3345,11 @@ fn build_action_menu() -> (Menu, TrayActions) {
         &translate,
         &history,
         &separator2,
-        &settings,
-        &separator3,
-        &exit,
     ]);
+    if show_layout_tip {
+        let _ = menu.append_items(&[&layout_tip, &separator3]);
+    }
+    let _ = menu.append_items(&[&settings, &separator4, &exit]);
     let actions = TrayActions {
         show: show.id().clone(),
         welcome: welcome.id().clone(),
@@ -3284,7 +3364,7 @@ fn build_action_menu() -> (Menu, TrayActions) {
 }
 
 fn setup_tray() -> (Option<TrayIcon>, TrayActions) {
-    let (menu, actions) = build_action_menu();
+    let (menu, actions) = build_action_menu(false);
     let icon = image::load_from_memory(include_bytes!("../../assets/app_icon.png"))
         .ok()
         .and_then(|image| {
